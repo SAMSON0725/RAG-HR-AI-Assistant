@@ -29,7 +29,11 @@ class HRChatbot:
         if self.api_key:
             self.api_key = self.api_key.strip()
         if not self.api_key:
-            raise ValueError("API_Agents_Key1 not found in environment variables. Please check your .env file.")
+            raise ValueError("❌ API_Agents_Key1 not found in environment variables. Please check your .env file.")
+        
+        # Validate API key format
+        if not self.api_key.startswith('sk-or-v1-'):
+            raise ValueError("❌ Invalid OpenRouter API key format. Key should start with 'sk-or-v1-'")
         
         self.system_prompt = """ You are a HR assistant with document management capabilities. 
         
@@ -63,6 +67,16 @@ Be friendly, helpful, and proactive in assisting with document management and HR
         ]
         user_lower = user_input.lower()
         return any(keyword in user_lower for keyword in upload_keywords)
+    
+    def detect_view_file_intent(self, user_input: str) -> bool:
+        """Detect if user wants to view uploaded files"""
+        view_keywords = [
+            'view file', 'see file', 'show file', 'preview', 'download file',
+            'view document', 'see document', 'show document', 'view upload',
+            'see uploaded', 'show uploaded', 'access file'
+        ]
+        user_lower = user_input.lower()
+        return any(keyword in user_lower for keyword in view_keywords)
 
     def get_response(self, user_input: str, history: list) -> tuple[str, bool]:
         """
@@ -92,6 +106,28 @@ To upload a file, please use the **"Upload Onboarding Files"** section on the le
 Would you like help with anything else after uploading your file?"""
                 return upload_guide, True
             
+            # Check for view file intent
+            if self.detect_view_file_intent(user_input):
+                view_guide = """To view your uploaded files, check the **"📂 Uploaded Files"** section in the left panel! 📂
+
+**What you can do:**
+1. **Preview Files**: Click on any file name to expand and view its contents
+   - Text/CSV files: See a preview of the content
+   - Excel files: View the first 10 rows in a table
+   - PDF/Word: Download to view locally
+
+2. **Download Files**: Each file has a ⬇️ Download button to save it to your computer
+
+3. **File Information**: See file size and format for each uploaded document
+
+**Alternatively**, you can ask me questions about the content:
+- "What's in the file?"
+- "Show me the data from [filename]"
+- "Summarize the uploaded document"
+
+The files are stored and indexed, so I can answer questions about their content anytime!"""
+                return view_guide, True
+            
             # Check if FAISS index exists and use RAG
             if FAISS_DIR.exists() and any(FAISS_DIR.iterdir()):
                 # Use RAG-enhanced response
@@ -103,7 +139,26 @@ Would you like help with anything else after uploading your file?"""
                 response = self.llm.invoke(messages)
                 return response.content, False
         except Exception as e:
-            return f"Error generating response: {str(e)}", False
+            error_msg = str(e)
+            
+            # Provide user-friendly error messages
+            if "401" in error_msg or "User not found" in error_msg:
+                return """❌ **API Authentication Error**
+                
+Your OpenRouter API key appears to be invalid or expired.
+
+**To fix this:**
+1. Visit https://openrouter.ai/keys
+2. Log in to your account
+3. Create a new API key
+4. Update the `API_Agents_Key1` in your `.env` file
+5. Restart the Streamlit application
+
+**Note:** Make sure you have credits in your OpenRouter account.""", False
+            elif "api_key" in error_msg.lower():
+                return f"❌ **API Key Error**: {error_msg}\n\nPlease check your OpenRouter API key in the .env file.", False
+            else:
+                return f"❌ **Error**: {error_msg}", False
 
 # Initialize session state
 if "chatbot" not in st.session_state:
@@ -158,24 +213,65 @@ with col1:
     st.markdown("---")
     
     # Display RAG status
-    st.subheader("📊 RAG Model Status")
+    st.subheader("📊 Status")
     if FAISS_DIR.exists() and any(FAISS_DIR.iterdir()):
         st.success("✓ RAG Model: Active")
-        st.caption("The chatbot will use uploaded documents to answer questions.")
     else:
         st.warning("○ RAG Model: Inactive")
-        st.caption("Upload a file to enable RAG-enhanced responses.")
     
-    # List uploaded files
+    # API Key status
+    api_key = os.getenv("API_Agents_Key1")
+    if api_key and api_key.startswith('sk-or-v1-'):
+        st.success("✓ API: Connected")
+    else:
+        st.error("✗ API: Invalid Key")
+    
+    st.markdown("---")
+    
+    # List uploaded files with preview option
     uploaded_files_list = list(UPLOADED_FILES_DIR.glob("*"))
     if uploaded_files_list:
-        st.markdown("**Uploaded Files:**")
+        st.subheader("📂 Uploaded Files")
         for file in uploaded_files_list:
-            st.text(f"• {file.name}")
+            with st.expander(f"📄 {file.name}"):
+                # Show file info
+                file_size = file.stat().st_size
+                st.caption(f"Size: {file_size / 1024:.2f} KB")
+                
+                # Add download button
+                with open(file, "rb") as f:
+                    st.download_button(
+                        label="⬇️ Download",
+                        data=f.read(),
+                        file_name=file.name,
+                        mime="application/octet-stream"
+                    )
+                
+                # Try to preview file content
+                try:
+                    if file.suffix.lower() in ['.txt', '.md', '.csv']:
+                        st.text("Preview:")
+                        content = file.read_text(encoding='utf-8', errors='ignore')
+                        st.text_area("", value=content[:1000] + ("..." if len(content) > 1000 else ""), height=200, key=f"preview_{file.name}")
+                    elif file.suffix.lower() in ['.xlsx', '.xls']:
+                        st.text("Excel Preview (first 10 rows):")
+                        import pandas as pd
+                        df = pd.read_excel(file)
+                        st.dataframe(df.head(10))
+                    elif file.suffix.lower() == '.pdf':
+                        st.info("PDF file uploaded. Ask me questions about its content!")
+                    elif file.suffix.lower() == '.docx':
+                        st.info("Word document uploaded. Ask me questions about its content!")
+                    else:
+                        st.info("File uploaded successfully. Ask me questions about its content!")
+                except Exception as e:
+                    st.warning(f"Cannot preview this file type. Use download to view locally.")
+    else:
+        st.caption("No files uploaded yet")
 
 # Right column: Chat Interface
 with col2:
-    st.subheader("🤖 Chat with HR Assistant")
+    st.subheader("💬 Chat with HR Assistant")
     
     # Chat container
     chat_container = st.container()
@@ -231,16 +327,9 @@ st.markdown("""
 2. **Ask Questions**: Type your questions in the chat box on the right
 3. **RAG-Enhanced Responses**: When files are uploaded, the chatbot will use them to provide accurate, context-aware answers
 
-**Supported File Types:**
-- 📊 Excel: .xlsx, .xls
-- 📄 PDF: .pdf
-- 📝 Word: .docx
-- 📋 CSV: .csv
-- 📃 Text: .txt, .md, and other text files
-
 **Example Questions:**
+- "I want to upload a file" (for upload guidance)
 - "What information is in the onboarding file?"
 - "How many employees are listed?"
-- "Show me details about John Doe"
-- "What is the average bill rate?"
+- "Show me details about John Egnore"
 """)
